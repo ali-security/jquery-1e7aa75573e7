@@ -2415,3 +2415,138 @@ test( "Validate creation of multiple quantities of certain elements (#13818)", 4
 		});
 	});
 });
+
+asyncTest( "Sanitized HTML doesn't get unsanitized (gh-4647)", 6, function() {
+	var container,
+		counter = 0,
+		remaining = 0,
+		executed = {};
+
+	// Record calls instead of running anything; none of the inputs below
+	// may manage to invoke this function.
+	Globals.register( "xss" );
+	window.xss = function( id ) {
+		executed[ id ] = true;
+	};
+
+	container = jQuery( "<div></div>" );
+	container.appendTo( "#qunit-fixture" );
+
+	function checkXss( method, htmlTemplate ) {
+		var currCounter = counter,
+			htmlString = htmlTemplate.replace( "XSS", "xss(" + currCounter + ")" ),
+			div = jQuery( "<div></div>" );
+
+		counter++;
+		remaining++;
+
+		div.appendTo( container );
+		if ( method === "jQuery" ) {
+			jQuery( htmlString );
+		} else {
+			div[ method ]( htmlString );
+		}
+
+		setTimeout(function() {
+			ok( !executed[ currCounter ], "Insecure code wasn't executed, method: " +
+				method + ", input: " + htmlString );
+			if ( --remaining === 0 ) {
+				start();
+			}
+		}, 1000 );
+	}
+
+	// Thanks to Masato Kinugawa from Cure53 for providing the original test case.
+	// Note: these only execute in browsers that drop <style> inside <select>;
+	// browsers with the relaxed <select> parser are covered by the
+	// wrapper check in the next test.
+	checkXss( "html", "<option><style></option></select><img src=url404 onerror=XSS></style>" );
+	checkXss( "html", "<optgroup><style></optgroup></select><img src=url404 onerror=XSS></style>" );
+	checkXss( "append", "<option><style></option></select><img src=url404 onerror=XSS></style>" );
+	checkXss( "prepend", "<optgroup><style></optgroup></select><img src=url404 onerror=XSS></style>" );
+	checkXss( "after", "<option><style></option></select><img src=url404 onerror=XSS></style>" );
+	checkXss( "jQuery", "<optgroup><style></optgroup></select><img src=url404 onerror=XSS></style>" );
+});
+
+test( "HTML starting with <option> or <optgroup> is parsed like any other HTML (gh-4647)", 24, function() {
+	var inputs = [
+			"<option><style></option></select><b>unsanitized</b></style>",
+			"<optgroup><style></optgroup></select><b>unsanitized</b></style>",
+			"<option>x</option><input>",
+			"<optgroup label='y'><option>x</option></optgroup><input>"
+		],
+		proto = window.Element && window.Element.prototype,
+		descriptor = proto && Object.getOwnPropertyDescriptor &&
+			Object.getOwnPropertyDescriptor( proto, "innerHTML" ),
+		canRecord = !!( descriptor && descriptor.set && descriptor.configurable );
+
+	// Collect every markup string assigned to innerHTML while fn runs
+	function recordInnerHTML( fn ) {
+		var assigned = [];
+
+		Object.defineProperty( proto, "innerHTML", {
+			configurable: true,
+			enumerable: descriptor.enumerable,
+			get: descriptor.get,
+			set: function( value ) {
+				assigned.push( String( value ) );
+				descriptor.set.call( this, value );
+			}
+		});
+
+		try {
+			fn();
+		} finally {
+			Object.defineProperty( proto, "innerHTML", descriptor );
+		}
+
+		return assigned;
+	}
+
+	function parse( method, html ) {
+		var div = jQuery( "<div></div>" );
+
+		if ( method === "parseHTML" ) {
+			div.append( jQuery.parseHTML( html ) );
+		} else {
+			div[ method ]( html );
+		}
+
+		return div[ 0 ].innerHTML;
+	}
+
+	jQuery.each( inputs, function( i, html ) {
+		var nativeDiv = document.createElement( "div" );
+
+		nativeDiv.innerHTML = html;
+
+		jQuery.each( [ "html", "append", "parseHTML" ], function( j, method ) {
+			var result, wrapped;
+
+			// Support: IE 9
+			// IE 9 drops <option> tags outside of <select>, so jQuery
+			// still has to wrap them there.
+			if ( jQuery.support.option === false ) {
+				ok( true, "IE 9 still needs the <select> wrapper; skipping " + method + "()" );
+				ok( true, "IE 9 still needs the <select> wrapper; skipping " + method + "()" );
+				return;
+			}
+
+			if ( canRecord ) {
+				wrapped = jQuery.grep( recordInnerHTML(function() {
+					result = parse( method, html );
+				}), function( markup ) {
+					return /^\s*<select/i.test( markup );
+				});
+				equal( wrapped.length, 0,
+					method + "() doesn't wrap the input in a <select>: " + html );
+			} else {
+				result = parse( method, html );
+				ok( true, "innerHTML assignments can't be intercepted; skipping wrapper check" );
+			}
+
+			equal( result, nativeDiv.innerHTML,
+				method + "() parses the input in the same context as a <div>: " + html );
+		});
+	});
+});
